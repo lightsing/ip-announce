@@ -3,12 +3,27 @@ use std::io::Cursor;
 use pnet::datalink::interfaces;
 use pnet::ipnetwork::IpNetwork;
 use pnet::util::MacAddr;
-use socket2::{Socket, Type, Domain, SockAddr};
+use socket2::{Domain, SockAddr, Socket, Type};
 
 use serde::{Deserialize, Serialize};
-use std::net::{SocketAddrV4, Ipv4Addr};
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::thread::sleep;
 use std::time::Duration;
+
+use thiserror::Error;
+
+#[derive(Error, Debug)]
+pub enum DecodeError {
+    #[error("unsupported report format")]
+    Unsupported,
+    #[error("bad/unrecognized format")]
+    BadFormat,
+    #[error("bad/unrecognized deserialize format")]
+    Deserialize(#[from] serde_cbor::Error),
+    #[cfg(feature = "compress")]
+    #[error("bad lzma compressed format")]
+    BadLzma,
+}
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Report {
@@ -43,15 +58,6 @@ impl Report {
             interfaces,
         };
         let mut serialized = Cursor::new(serde_cbor::to_vec(&report).expect("cannot serialize"));
-        #[cfg(feature = "compress")]
-        let mut compressed = Cursor::new(Vec::new());
-        #[cfg(all(feature = "compress", not(any(feature = "lzma2", feature = "xz"))))]
-        lzma_rs::lzma_compress(&mut serialized, &mut compressed).unwrap();
-        #[cfg(all(feature = "compress", not(any(feature = "lzma", feature = "xz"))))]
-        lzma_rs::lzma2_compress(&mut serialized, &mut compressed).unwrap();
-        #[cfg(all(feature = "compress", not(any(feature = "lzma", feature = "lzma2"))))]
-        lzma_rs::lzma2_compress(&mut serialized, &mut compressed).unwrap();
-
         #[cfg(not(feature = "compress"))]
         {
             let serialized = serialized.into_inner();
@@ -59,30 +65,34 @@ impl Report {
         }
         #[cfg(feature = "compress")]
         {
+            let mut compressed = Cursor::new(Vec::new());
+            lzma_rs::lzma_compress(&mut serialized, &mut compressed).unwrap();
             let compressed = compressed.into_inner();
             return compressed;
         }
     }
 
-    fn decode<B: AsRef<[u8]>>(buf: B) -> Result<Self, serde_cbor::Error> {
-        let mut data = Cursor::new(buf.as_ref());
-        #[cfg(feature = "compress")]
-        {
-            let mut decompressed = Cursor::new(Vec::new());
-            #[cfg(all(feature = "compress", not(any(feature = "lzma2", feature = "xz"))))]
-            lzma_rs::lzma_decompress(&mut data, &mut decompressed).unwrap();
-            #[cfg(all(feature = "compress", not(any(feature = "lzma", feature = "xz"))))]
-            lzma_rs::lzma2_decompress(&mut data, &mut decompressed).unwrap();
-            #[cfg(all(feature = "compress", not(any(feature = "lzma", feature = "lzma2"))))]
-            lzma_rs::xz_decompress(&mut data, &mut decompressed).unwrap();
-            let serialized = decompressed.into_inner();
-            let report = serde_cbor::from_slice(&serialized)?;
-            return Ok(report);
+    fn decode<B: AsRef<[u8]>>(buf: B) -> Result<Self, DecodeError> {
+        let buf = buf.as_ref();
+        if buf.len() < 2 {
+            return Err(DecodeError::BadFormat);
         }
-        #[cfg(not(feature = "compress"))]
-        {
-            let report = serde_cbor::from_slice(data.into_inner)?;
-            return Ok(report);
+        let compressed = buf[0] & 0x01 == 0;
+        if compressed {
+            #[cfg(feature = "compress")]
+            {
+                let mut decompressed = Cursor::new(Vec::new());
+                lzma_rs::lzma_decompress(&mut data, &mut decompressed).unwrap();
+                let serialized = decompressed.into_inner();
+                let report = serde_cbor::from_slice(&serialized)?;
+                Ok(report)
+            }
+            #[cfg(not(feature = "compress"))]
+            Err(DecodeError::Unsupported)
+        } else {
+            let mut data = Cursor::new(&buf[1..]);
+            let report = serde_cbor::from_slice(data.into_inner())?;
+            Ok(report)
         }
     }
 }
@@ -93,7 +103,9 @@ fn main() {
     let report = Report::new();
     let broadcast = SockAddr::from(SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 58379));
     loop {
-        socket.send_to(&report, &broadcast).expect("broadcast failed");
+        socket
+            .send_to(&report, &broadcast)
+            .expect("broadcast failed");
         sleep(Duration::from_secs(1))
     }
 }
