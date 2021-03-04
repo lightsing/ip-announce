@@ -13,6 +13,12 @@ use std::time::Duration;
 use thiserror::Error;
 
 #[derive(Error, Debug)]
+pub enum EncodeError {
+    #[error("bad/unrecognized deserialize format")]
+    Serialize(#[from] serde_cbor::Error),
+}
+
+#[derive(Error, Debug)]
 pub enum DecodeError {
     #[error("unsupported report format")]
     Unsupported,
@@ -38,7 +44,7 @@ struct Interface {
 }
 
 impl Report {
-    fn new() -> Vec<u8> {
+    fn new_inner() -> Result<Vec<u8>, EncodeError> {
         let hostname = match hostname::get() {
             Ok(oss) => oss.into_string().ok(),
             Err(_) => None,
@@ -57,19 +63,23 @@ impl Report {
             hostname,
             interfaces,
         };
-        let mut serialized = Cursor::new(serde_cbor::to_vec(&report).expect("cannot serialize"));
-        #[cfg(not(feature = "compress"))]
-        {
-            let serialized = serialized.into_inner();
-            return serialized;
-        }
-        #[cfg(feature = "compress")]
-        {
-            let mut compressed = Cursor::new(Vec::new());
-            lzma_rs::lzma_compress(&mut serialized, &mut compressed).unwrap();
-            let compressed = compressed.into_inner();
-            return compressed;
-        }
+        return Ok(serde_cbor::to_vec(&report)?)
+    }
+
+    fn new() -> Result<Vec<u8>, EncodeError> {
+        let mut serialized = Self::new_inner()?;
+        serialized.insert(0, 0);
+        return Ok(serialized)
+    }
+
+    #[cfg(feature = "compress")]
+    fn new_compressed() -> Result<Vec<u8>, EncodeError> {
+        let mut serialized = Cursor::new(Self::new_inner()?);
+        let mut compressed = Cursor::new(Vec::new());
+        lzma_rs::lzma_compress(&mut serialized, &mut compressed)?;
+        let mut compressed = compressed.into_inner();
+        compressed.insert(0, 1);
+        return Ok(compressed)
     }
 
     fn decode<B: AsRef<[u8]>>(buf: B) -> Result<Self, DecodeError> {
@@ -97,10 +107,10 @@ impl Report {
     }
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let socket = Socket::new(Domain::ipv4(), Type::dgram(), None).expect("socket failed");
     socket.set_broadcast(true).expect("set_broadcast failed");
-    let report = Report::new();
+    let report = Report::new()?;
     let broadcast = SockAddr::from(SocketAddrV4::new(Ipv4Addr::new(255, 255, 255, 255), 58379));
     loop {
         socket
