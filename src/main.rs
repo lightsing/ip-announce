@@ -4,10 +4,7 @@ use std::time::Duration;
 
 use socket2::{Domain, SockAddr, Socket, Type};
 
-mod error;
-mod report;
-
-use crate::report::Report;
+use ip_announce::Report;
 
 fn main() -> anyhow::Result<()> {
     let socket = Socket::new(Domain::ipv4(), Type::dgram(), None).expect("socket failed");

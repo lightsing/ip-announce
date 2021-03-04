@@ -4,6 +4,14 @@ version = "0.1.0"
 authors = ["lightsing <light.tsing@gmail.com>"]
 edition = "2018"
 
+[lib]
+name = "ip_announce"
+path = "src/lib.rs"
+
+[[bin]]
+name = "ip-announce"
+path = "src/main.rs"
+
 [features]
 compress = ["lzma-rs"]
 
